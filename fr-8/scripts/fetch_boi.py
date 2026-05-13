@@ -32,10 +32,13 @@ except ImportError:
 SDMX_BASE = "https://edge.boi.gov.il/FusionEdgeServer/sdmx/v2/data/dataflow/BOI.STATISTICS/EXR/1.0"
 SERIES = "RER_USD_ILS,RER_EUR_ILS,RER_GBP_ILS"
 
+# BOI series RER_USD_ILS publishes "ILS per USD" — the same convention as NS
+# where base=ILS, transactioncurrency=USD, rate=ILS-per-USD.
+# Stored as (ILS, USD) so keys align with NS data keys throughout the skill.
 BOI_SERIES_TO_PAIR = {
-    "RER_USD_ILS": ("USD", "ILS"),
-    "RER_EUR_ILS": ("EUR", "ILS"),
-    "RER_GBP_ILS": ("GBP", "ILS"),
+    "RER_USD_ILS": ("ILS", "USD"),
+    "RER_EUR_ILS": ("ILS", "EUR"),
+    "RER_GBP_ILS": ("ILS", "GBP"),
 }
 
 

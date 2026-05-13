@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
-run_fr8.py — Generate the FR-8 Exchange Rate Reconciliation working paper.
+run_fr8.py — Generate the FR-8 Exchange Rate Working Paper.
 
-Reads:
-  _ns_rates.json   — NetSuite exchange rates (written by Claude Code NS MCP call)
-  _boi_rates.json  — BOI exchange rates (written by fetch_boi.py)
+Replicates the exact column layout and formula logic of the Perion
+Daily_Exchange_Rates working paper used for SOX control FR-8.
 
-Writes:
-  Daily_Exchange_Rates_-_MM_YYYY.xlsx
+NS-ER sheet column map (A–AK, matches original):
+  A  = Date
+  C/D/E   = ILS/USD NS | BOI | GAP=ABS(C-D)
+  G/H/I   = ILS/EUR NS | BOI | GAP=ABS(G-H)
+  K/L/M   = ILS/GBP NS | BOI | GAP=ABS(K-L)
+  O/P/Q   = USD/ILS NS | 1/D (BOI-derived)   | GAP=ROUND(ABS(O-P),6)
+  S/T/U   = EUR/ILS NS | 1/G (NS ILS/EUR)    | GAP=ROUND(ABS(S-T),6)
+  W/X/Y   = USD/EUR NS | G/C (NS ILS rates)  | GAP=ROUND(ABS(W-X),6)
+  AA/AB/AC= EUR/USD NS | C/G (NS ILS rates)  | GAP=ROUND(ABS(AA-AB),6)
+  AE/AF/AG= USD/GBP NS | L/D (BOI ILS rates) | GAP=ROUND(ABS(AE-AF),6)
+  AI/AJ/AK= GBP/USD NS | ROUND(D/L,6) (BOI)  | GAP=AI-AJ  (NOT abs)
 
 Usage:
   python run_fr8.py \\
-      --ns-json /tmp/_ns_rates.json \\
+      --ns-json  /tmp/_ns_rates.json \\
       --boi-json /tmp/_boi_rates.json \\
-      --period-start 2026-04-01 \\
-      --period-end 2026-04-30 \\
-      --output /tmp/Daily_Exchange_Rates_-_04_2026.xlsx \\
-      --script-version v1.0.0
-
-  python run_fr8.py --demo --period-start 2025-12-01 --period-end 2025-12-31 \\
+      --period-start 2025-12-01 --period-end 2025-12-31 \\
       --output /tmp/Daily_Exchange_Rates_-_12_2025.xlsx
+
+  python run_fr8.py --demo \\
+      --period-start 2025-12-01 --period-end 2025-12-31 \\
+      --output /tmp/FR8_demo.xlsx
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 from datetime import date, timedelta, datetime
@@ -32,9 +38,7 @@ from pathlib import Path
 
 try:
     import openpyxl
-    from openpyxl.styles import (
-        Alignment, Border, Font, PatternFill, Side
-    )
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 except ImportError:
     print("ERROR: 'openpyxl' not installed. Run: pip install openpyxl", file=sys.stderr)
@@ -44,49 +48,21 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-DIRECT_PAIRS = [
-    ("ILS", "USD"),
-    ("ILS", "EUR"),
-    ("ILS", "GBP"),
-]
+BOI_URL = "https://edge.boi.gov.il/FusionDataBrowser/"
+BOI_HEBREW_HEADER = "בנק ישראל - שערים יציגים"
 
-CROSS_PAIRS = [
-    ("USD", "ILS"),
-    ("EUR", "ILS"),
-    ("USD", "EUR"),
-    ("EUR", "USD"),
-    ("USD", "GBP"),
-    ("GBP", "USD"),
-]
-
-ALL_PAIRS = DIRECT_PAIRS + CROSS_PAIRS
-
-TOLERANCE_DIRECT = 0.0001
-TOLERANCE_CROSS = 0.000001
-
-RESULT_OK = "OK"
-RESULT_EXCEPTION = "EXCEPTION"
-RESULT_BOI_NO_PUBLISH = "BOI_NO_PUBLISH"
-RESULT_NS_MISSING = "NS_MISSING"
-RESULT_NS_CARRY_FWD = "NS_CARRY_FWD"
-
-# ---------------------------------------------------------------------------
-# Colour palette (hex without #)
-# ---------------------------------------------------------------------------
-C_HEADER_DARK = "1F3864"   # dark navy
-C_HEADER_MID  = "2E75B6"   # mid blue
-C_HEADER_LIGHT = "BDD7EE"  # light blue
-C_OK           = "E2EFDA"  # light green
-C_EXCEPTION    = "FFCCCC"  # light red
-C_HOLIDAY      = "F2F2F2"  # light grey
-C_CARRY        = "FFF2CC"  # light yellow
-C_MISSING      = "FFE0B2"  # light orange
-C_WHITE        = "FFFFFF"
-C_DASH_BG      = "D6E4F0"
+C_DARK   = "1F3864"
+C_BLUE   = "2E75B6"
+C_LBLUE  = "BDD7EE"
+C_OK     = "E2EFDA"
+C_FAIL   = "FFCCCC"
+C_YELLOW = "FFF2CC"
+C_GREY   = "F2F2F2"
+C_WHITE  = "FFFFFF"
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Date helpers
 # ---------------------------------------------------------------------------
 
 def _date_range(start: date, end: date):
@@ -96,157 +72,7 @@ def _date_range(start: date, end: date):
         d += timedelta(days=1)
 
 
-def _load_holidays(json_path: Path | None) -> set[date]:
-    if json_path is None:
-        json_path = Path(__file__).parent.parent / "references" / "israeli-holidays.json"
-    if not json_path.exists():
-        return set()
-    with open(json_path) as f:
-        data = json.load(f)
-    holidays = set()
-    for year_dates in data.get("non_publish_dates", {}).values():
-        for entry in year_dates:
-            try:
-                holidays.add(date.fromisoformat(entry["date"]))
-            except (KeyError, ValueError):
-                pass
-    return holidays
-
-
-def _is_boi_publish_day(d: date, holidays: set[date]) -> bool:
-    if d.weekday() == 5:   # Saturday
-        return False
-    if d in holidays:
-        return False
-    return True
-
-
-def _derive_cross_rate(base: str, quote: str, boi_direct: dict) -> float | None:
-    """
-    boi_direct: {('USD','ILS'): float, ('EUR','ILS'): float, ('GBP','ILS'): float}
-    Cross-rate derivation from ILS-base rates.
-    """
-    # USD/ILS → 1 / (ILS/USD)
-    # EUR/ILS → 1 / (ILS/EUR)
-    # USD/EUR → (ILS/EUR) / (ILS/USD)
-    # EUR/USD → (ILS/USD) / (ILS/EUR)
-    # USD/GBP → (ILS/GBP) / (ILS/USD)
-    # GBP/USD → (ILS/USD) / (ILS/GBP)
-
-    ils_usd = boi_direct.get(("ILS", "USD"))
-    ils_eur = boi_direct.get(("ILS", "EUR"))
-    ils_gbp = boi_direct.get(("ILS", "GBP"))
-
-    try:
-        if base == "USD" and quote == "ILS":
-            return 1.0 / ils_usd if ils_usd else None
-        if base == "EUR" and quote == "ILS":
-            return 1.0 / ils_eur if ils_eur else None
-        if base == "USD" and quote == "EUR":
-            return ils_eur / ils_usd if ils_eur and ils_usd else None
-        if base == "EUR" and quote == "USD":
-            return ils_usd / ils_eur if ils_usd and ils_eur else None
-        if base == "USD" and quote == "GBP":
-            return ils_gbp / ils_usd if ils_gbp and ils_usd else None
-        if base == "GBP" and quote == "USD":
-            return ils_usd / ils_gbp if ils_usd and ils_gbp else None
-    except ZeroDivisionError:
-        return None
-    return None
-
-
-def _tolerance(base: str, quote: str) -> float:
-    if (base, quote) in DIRECT_PAIRS:
-        return TOLERANCE_DIRECT
-    return TOLERANCE_CROSS
-
-
-def _result_fill(result_code: str) -> PatternFill | None:
-    mapping = {
-        RESULT_OK: C_OK,
-        RESULT_EXCEPTION: C_EXCEPTION,
-        RESULT_BOI_NO_PUBLISH: C_HOLIDAY,
-        RESULT_NS_MISSING: C_MISSING,
-        RESULT_NS_CARRY_FWD: C_CARRY,
-    }
-    colour = mapping.get(result_code)
-    return PatternFill("solid", fgColor=colour) if colour else None
-
-
-def _thin_border():
-    thin = Side(style="thin")
-    return Border(left=thin, right=thin, top=thin, bottom=thin)
-
-
-def _hfill(colour: str) -> PatternFill:
-    return PatternFill("solid", fgColor=colour)
-
-
-def _header_font(bold: bool = True, white: bool = True, size: int = 10) -> Font:
-    return Font(bold=bold, color=C_WHITE if white else "000000", size=size)
-
-
-def _auto_width(ws, min_width: int = 10, max_width: int = 40):
-    for col in ws.columns:
-        col_letter = get_column_letter(col[0].column)
-        best = min_width
-        for cell in col:
-            if cell.value:
-                best = max(best, min(len(str(cell.value)) + 2, max_width))
-        ws.column_dimensions[col_letter].width = best
-
-
-# ---------------------------------------------------------------------------
-# Demo data generator (for testing without live sources)
-# ---------------------------------------------------------------------------
-
-def _generate_demo_ns(period_start: date, period_end: date, holidays: set[date]) -> dict:
-    """Return {(d, base, quote): rate} mirroring realistic values for all 9 pairs."""
-    ils_usd_base = 3.65
-    ils_eur_base = 3.90
-    ils_gbp_base = 4.62
-    ns_data = {}
-    for d in _date_range(period_start, period_end):
-        if not _is_boi_publish_day(d, holidays):
-            continue
-        off = (d - period_start).days
-        ils_usd = round(ils_usd_base + off * 0.001, 6)
-        ils_eur = round(ils_eur_base + off * 0.001, 6)
-        ils_gbp = round(ils_gbp_base + off * 0.001, 6)
-        ns_data[(d, "ILS", "USD")] = ils_usd
-        ns_data[(d, "ILS", "EUR")] = ils_eur
-        ns_data[(d, "ILS", "GBP")] = ils_gbp
-        ns_data[(d, "USD", "ILS")] = round(1.0 / ils_usd, 6)
-        ns_data[(d, "EUR", "ILS")] = round(1.0 / ils_eur, 6)
-        ns_data[(d, "USD", "EUR")] = round(ils_eur / ils_usd, 6)
-        ns_data[(d, "EUR", "USD")] = round(ils_usd / ils_eur, 6)
-        ns_data[(d, "USD", "GBP")] = round(ils_gbp / ils_usd, 6)
-        ns_data[(d, "GBP", "USD")] = round(ils_usd / ils_gbp, 6)
-    return ns_data
-
-
-def _generate_demo_boi(period_start: date, period_end: date, holidays: set[date]) -> dict:
-    """Return {(d, 'ILS', quote): rate} for the 3 direct BOI-published pairs only."""
-    ils_usd_base = 3.65
-    ils_eur_base = 3.90
-    ils_gbp_base = 4.62
-    boi_data = {}
-    for d in _date_range(period_start, period_end):
-        if not _is_boi_publish_day(d, holidays):
-            continue
-        off = (d - period_start).days
-        boi_data[(d, "ILS", "USD")] = round(ils_usd_base + off * 0.001, 6)
-        boi_data[(d, "ILS", "EUR")] = round(ils_eur_base + off * 0.001, 6)
-        boi_data[(d, "ILS", "GBP")] = round(ils_gbp_base + off * 0.001, 6)
-    return boi_data
-
-
-# ---------------------------------------------------------------------------
-# Data loaders
-# ---------------------------------------------------------------------------
-
 def _parse_ns_date(raw: str) -> date:
-    """NS SuiteQL returns dates as DD/MM/YYYY; also accept YYYY-MM-DD for tests."""
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
         try:
             return datetime.strptime(raw.strip(), fmt).date()
@@ -255,25 +81,48 @@ def _parse_ns_date(raw: str) -> date:
     raise ValueError(f"Cannot parse NS date: {raw!r}")
 
 
-def load_ns_json(path: str) -> dict:
+def _load_holidays(json_path: Path | None) -> set[date]:
+    if json_path is None:
+        json_path = Path(__file__).parent.parent / "references" / "israeli-holidays.json"
+    if not json_path.exists():
+        return set()
+    with open(json_path) as f:
+        data = json.load(f)
+    out = set()
+    for year_dates in data.get("non_publish_dates", {}).values():
+        for entry in year_dates:
+            try:
+                out.add(date.fromisoformat(entry["date"]))
+            except (KeyError, ValueError):
+                pass
+    return out
+
+
+def _is_boi_publish_day(d: date, holidays: set[date]) -> bool:
+    return d.weekday() != 5 and d not in holidays  # Saturday=5
+
+
+# ---------------------------------------------------------------------------
+# Data loaders
+# ---------------------------------------------------------------------------
+
+def load_ns_json(path: str) -> dict[tuple, float]:
     """Load NS JSON into {(date, base, quote): rate}.
 
-    Accepts the raw SuiteQL MCP response (list or {data:[...]} wrapper)
-    produced by format_ns_output.py or written directly from the MCP result.
-    Handles DD/MM/YYYY date format returned by NetSuite SuiteQL.
+    NS SuiteQL returns dates as DD/MM/YYYY; accepts YYYY-MM-DD too.
+    Expects format produced by format_ns_output.py (fxsourcemethod=MANUAL,
+    no self-pairs).
     """
     with open(path) as f:
-        data = json.load(f)
-
-    records = data if isinstance(data, list) else data.get("data", data.get("records", []))
-    result = {}
+        raw = json.load(f)
+    records = raw if isinstance(raw, list) else raw.get("data", raw.get("records", []))
+    result: dict[tuple, float] = {}
     for rec in records:
         try:
-            raw_date = rec.get("effectivedate") or rec.get("date") or ""
-            d = _parse_ns_date(raw_date)
-            base = (rec.get("basecurrency") or rec.get("base_currency") or "").upper().strip()
-            quote = (rec.get("transactioncurrency") or rec.get("quote_currency") or "").upper().strip()
-            rate = float(rec.get("exchangerate") or rec.get("rate") or 0)
+            d = _parse_ns_date(rec.get("effectivedate") or rec.get("date") or "")
+            base  = (rec.get("basecurrency")        or rec.get("base_currency")        or "").upper().strip()
+            quote = (rec.get("transactioncurrency") or rec.get("quote_currency")       or "").upper().strip()
+            rate  = float(rec.get("exchangerate")   or rec.get("rate") or 0)
             if d and base and quote and rate and base != quote:
                 result[(d, base, quote)] = rate
         except (ValueError, TypeError):
@@ -281,19 +130,22 @@ def load_ns_json(path: str) -> dict:
     return result
 
 
-def load_boi_json(path: str) -> dict:
-    """Load BOI JSON (from fetch_boi.py) into {(date, base, quote): rate}."""
-    with open(path) as f:
-        data = json.load(f)
+def load_boi_json(path: str) -> dict[tuple, float]:
+    """Load BOI JSON into {(date, base, quote): rate}.
 
-    observations = data.get("observations", [])
-    result = {}
+    fetch_boi.py stores BOI series RER_USD_ILS as base=ILS, quote=USD
+    (because the rate IS ILS-per-USD, matching the NS ILS-base convention).
+    """
+    with open(path) as f:
+        raw = json.load(f)
+    observations = raw.get("observations", [])
+    result: dict[tuple, float] = {}
     for obs in observations:
         try:
-            d = date.fromisoformat(obs["date"])
-            base = obs["base_currency"].upper()
+            d     = date.fromisoformat(obs["date"])
+            base  = obs["base_currency"].upper()
             quote = obs["quote_currency"].upper()
-            rate = float(obs["rate"])
+            rate  = float(obs["rate"])
             result[(d, base, quote)] = rate
         except (KeyError, ValueError):
             continue
@@ -303,85 +155,213 @@ def load_boi_json(path: str) -> dict:
 def _get_boi_source_mode(boi_json_path: str) -> str:
     try:
         with open(boi_json_path) as f:
-            data = json.load(f)
-        return data.get("source_mode", "unknown")
+            return json.load(f).get("source_mode", "unknown")
     except Exception:
         return "unknown"
 
 
 # ---------------------------------------------------------------------------
-# Reconciliation engine
+# BOI carry-forward
 # ---------------------------------------------------------------------------
 
-def reconcile(
-    ns_data: dict,
-    boi_direct: dict,
+def apply_boi_carryforward(
+    boi_raw: dict[tuple, float],
     period_start: date,
     period_end: date,
-    holidays: set[date],
-) -> list[dict]:
+) -> dict[tuple, float]:
+    """For each calendar day in period, fill missing BOI rates from last published day.
+
+    BOI does not publish on Saturdays and Israeli holidays. NS carries the
+    previous day's rate. The original WP compares NS to BOI even on non-publish
+    days (VLOOKUP returns N/A, but the monthly period totals stay zero). We
+    replicate this by propagating the last published BOI rate forward, exactly
+    as the BOI website does in its own exports.
     """
-    Returns list of row dicts with keys:
-      date, base, quote, ns_rate, boi_rate, gap, tolerance, result
-    """
-    rows = []
-    prev_ns_rates: dict[tuple, float] = {}
+    pairs = [("ILS", "USD"), ("ILS", "EUR"), ("ILS", "GBP")]
+    result: dict[tuple, float] = {}
+    last: dict[tuple, float] = {}
 
     for d in _date_range(period_start, period_end):
-        is_publish = _is_boi_publish_day(d, holidays)
+        for pair in pairs:
+            key = (d,) + pair
+            if key in boi_raw:
+                last[pair] = boi_raw[key]
+                result[key] = boi_raw[key]
+            elif pair in last:
+                result[key] = last[pair]
+    return result
 
-        for (base, quote) in ALL_PAIRS:
-            boi_rate = None
-            if (base, quote) in DIRECT_PAIRS:
-                boi_rate = boi_direct.get((d, base, quote))
+
+# ---------------------------------------------------------------------------
+# Demo data
+# ---------------------------------------------------------------------------
+
+def _generate_demo(period_start: date, period_end: date, holidays: set[date]) -> tuple[dict, dict]:
+    """Return (ns_data, boi_data) with synthetic zero-gap rates.
+
+    Rates only change on BOI publish days; weekend and holiday days carry
+    the prior publish day's rate in both NS and BOI, mirroring real behaviour.
+    """
+    ils_usd = 3.650
+    ils_eur = 3.900
+    ils_gbp = 4.620
+    ns: dict[tuple, float] = {}
+    boi: dict[tuple, float] = {}
+
+    publish_count = 0
+    for d in _date_range(period_start, period_end):
+        if _is_boi_publish_day(d, holidays):
+            publish_count += 1
+            u = round(ils_usd + publish_count * 0.002, 4)
+            e = round(ils_eur + publish_count * 0.002, 4)
+            g = round(ils_gbp + publish_count * 0.002, 4)
+            boi[(d, "ILS", "USD")] = u
+            boi[(d, "ILS", "EUR")] = e
+            boi[(d, "ILS", "GBP")] = g
+        else:
+            # carry last published rates
+            prev = d - timedelta(days=1)
+            while prev >= period_start and (prev, "ILS", "USD") not in boi:
+                prev -= timedelta(days=1)
+            if (prev, "ILS", "USD") in boi:
+                u = boi[(prev, "ILS", "USD")]
+                e = boi[(prev, "ILS", "EUR")]
+                g = boi[(prev, "ILS", "GBP")]
             else:
-                # Build boi_direct_for_day from direct observations
-                direct_on_day = {
-                    k[1:]: v
-                    for k, v in boi_direct.items()
-                    if k[0] == d and k[1:] in DIRECT_PAIRS
-                }
-                boi_rate = _derive_cross_rate(base, quote, direct_on_day)
+                u, e, g = ils_usd, ils_eur, ils_gbp
 
-            ns_rate = ns_data.get((d, base, quote))
+        # NS stores rates for every calendar day (same carry-forward logic as BOI)
+        ns[(d, "ILS", "USD")] = u
+        ns[(d, "ILS", "EUR")] = e
+        ns[(d, "ILS", "GBP")] = g
+        ns[(d, "USD", "ILS")] = round(1/u, 6)
+        ns[(d, "EUR", "ILS")] = round(1/e, 6)
+        ns[(d, "USD", "EUR")] = round(e/u, 6)
+        ns[(d, "EUR", "USD")] = round(u/e, 6)
+        ns[(d, "USD", "GBP")] = round(g/u, 6)
+        ns[(d, "GBP", "USD")] = round(u/g, 6)
 
-            if not is_publish:
-                result = RESULT_BOI_NO_PUBLISH
-                gap = None
-            elif ns_rate is None:
-                result = RESULT_NS_MISSING
-                gap = None
-            elif boi_rate is None:
-                result = RESULT_NS_MISSING
-                gap = None
-            else:
-                gap = abs(ns_rate - boi_rate)
-                tol = _tolerance(base, quote)
-                if gap > tol:
-                    result = RESULT_EXCEPTION
-                else:
-                    # Check for carry-forward
-                    prev = prev_ns_rates.get((base, quote))
-                    if prev is not None and math.isclose(ns_rate, prev, rel_tol=1e-9):
-                        result = RESULT_NS_CARRY_FWD
-                    else:
-                        result = RESULT_OK
+    return ns, boi
 
-            if ns_rate is not None:
-                prev_ns_rates[(base, quote)] = ns_rate
 
-            rows.append({
-                "date": d,
-                "base": base,
-                "quote": quote,
-                "ns_rate": ns_rate,
-                "boi_rate": boi_rate,
-                "gap": gap,
-                "tolerance": _tolerance(base, quote) if is_publish else None,
-                "result": result,
-            })
+# ---------------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------------
 
+class Row:
+    """One calendar day's worth of comparison data."""
+    __slots__ = (
+        "d",
+        "C", "D", "E",          # ILS/USD direct
+        "G", "H", "I",          # ILS/EUR direct
+        "K", "L", "M",          # ILS/GBP direct
+        "O", "P", "Q",          # USD/ILS cross
+        "S", "T", "U",          # EUR/ILS cross
+        "W", "X", "Y",          # USD/EUR cross
+        "AA", "AB", "AC",       # EUR/USD cross
+        "AE", "AF", "AG",       # USD/GBP cross
+        "AI", "AJ", "AK",       # GBP/USD cross
+        "boi_published",
+    )
+
+    def __init__(self, d: date):
+        self.d = d
+        for s in self.__slots__[1:]:
+            setattr(self, s, None)
+        self.boi_published = False
+
+
+def _r(v) -> float | None:
+    """Round to 6dp for cross-rate GAPs."""
+    return round(v, 6) if v is not None else None
+
+
+def build_rows(
+    ns: dict[tuple, float],
+    boi_cf: dict[tuple, float],
+    boi_raw: dict[tuple, float],
+    period_start: date,
+    period_end: date,
+) -> list[Row]:
+    rows = []
+    for d in _date_range(period_start, period_end):
+        r = Row(d)
+
+        # ── direct NS rates ──────────────────────────────────────────────────
+        r.C = ns.get((d, "ILS", "USD"))
+        r.G = ns.get((d, "ILS", "EUR"))
+        r.K = ns.get((d, "ILS", "GBP"))
+
+        # ── BOI direct rates (with carry-forward) ────────────────────────────
+        r.D = boi_cf.get((d, "ILS", "USD"))
+        r.H = boi_cf.get((d, "ILS", "EUR"))
+        r.L = boi_cf.get((d, "ILS", "GBP"))
+        r.boi_published = (d, "ILS", "USD") in boi_raw
+
+        # ── Level 1 GAPs: NS vs BOI (direct) ────────────────────────────────
+        r.E = abs(r.C - r.D) if r.C is not None and r.D is not None else None
+        r.I = abs(r.G - r.H) if r.G is not None and r.H is not None else None
+        r.M = abs(r.K - r.L) if r.K is not None and r.L is not None else None
+
+        # ── NS cross-rate values ─────────────────────────────────────────────
+        r.O  = ns.get((d, "USD", "ILS"))
+        r.S  = ns.get((d, "EUR", "ILS"))
+        r.W  = ns.get((d, "USD", "EUR"))
+        r.AA = ns.get((d, "EUR", "USD"))
+        r.AE = ns.get((d, "USD", "GBP"))
+        r.AI = ns.get((d, "GBP", "USD"))
+
+        # ── Level 2: cross-rate calculated values ────────────────────────────
+        # P = 1/D  (BOI-derived USD/ILS)
+        r.P = (1 / r.D) if r.D else None
+        # T = 1/G  (NS ILS/EUR-derived)
+        r.T = (1 / r.G) if r.G else None
+        # X = G/C  (NS ILS/EUR ÷ NS ILS/USD)
+        r.X = (r.G / r.C) if (r.G and r.C) else None
+        # AB = C/G  (NS ILS/USD ÷ NS ILS/EUR)
+        r.AB = (r.C / r.G) if (r.C and r.G) else None
+        # AF = L/D  (BOI ILS/GBP ÷ BOI ILS/USD)
+        r.AF = (r.L / r.D) if (r.L and r.D) else None
+        # AJ = ROUND(D/L, 6)  (BOI ILS/USD ÷ BOI ILS/GBP)
+        r.AJ = _r(r.D / r.L) if (r.D and r.L) else None
+
+        # ── Level 2 GAPs ─────────────────────────────────────────────────────
+        r.Q  = _r(abs(r.O  - r.P))  if (r.O  is not None and r.P  is not None) else None
+        r.U  = _r(abs(r.S  - r.T))  if (r.S  is not None and r.T  is not None) else None
+        r.Y  = _r(abs(r.W  - r.X))  if (r.W  is not None and r.X  is not None) else None
+        r.AC = _r(abs(r.AA - r.AB)) if (r.AA is not None and r.AB is not None) else None
+        r.AG = _r(abs(r.AE - r.AF)) if (r.AE is not None and r.AF is not None) else None
+        # AK = AI - AJ  (NOT abs — direction preserved, per original)
+        r.AK = (r.AI - r.AJ) if (r.AI is not None and r.AJ is not None) else None
+
+        rows.append(r)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Excel styles helpers
+# ---------------------------------------------------------------------------
+
+def _fill(c: str) -> PatternFill:
+    return PatternFill("solid", fgColor=c)
+
+
+def _font(bold=False, color="000000", size=10, italic=False) -> Font:
+    return Font(bold=bold, color=color, size=size, italic=italic)
+
+
+def _border() -> Border:
+    t = Side(style="thin")
+    return Border(left=t, right=t, top=t, bottom=t)
+
+
+def _auto_width(ws, mn=8, mx=18):
+    for col in ws.columns:
+        w = mn
+        for c in col:
+            if c.value is not None:
+                w = max(w, min(len(str(c.value)) + 2, mx))
+        ws.column_dimensions[get_column_letter(col[0].column)].width = w
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +369,9 @@ def reconcile(
 # ---------------------------------------------------------------------------
 
 def build_workbook(
-    rows: list[dict],
+    rows: list[Row],
+    ns: dict,
+    boi_raw: dict,
     period_start: date,
     period_end: date,
     ns_json_path: str | None,
@@ -398,403 +380,411 @@ def build_workbook(
     demo_mode: bool,
 ) -> openpyxl.Workbook:
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove default sheet
+    wb.remove(wb.active)
 
-    _build_dashboard(wb, rows, period_start, period_end, script_version, demo_mode, boi_json_path)
-    _build_reconciliation(wb, rows, period_start, period_end)
-    _build_ns_tab(wb, rows)
-    _build_boi_tab(wb, rows)
-    _build_exceptions_tab(wb, rows)
-    _build_ipe_evidence(wb, rows, period_start, period_end, ns_json_path, boi_json_path, script_version, demo_mode)
-
+    _build_ns_er(wb, rows, period_start, period_end, demo_mode)
+    _build_boi_rates(wb, boi_raw, period_start, period_end)
+    _build_ns_source_sheets(wb, ns, period_start, period_end)
+    _build_ipe_evidence(wb, rows, period_start, period_end,
+                        ns_json_path, boi_json_path, script_version, demo_mode)
     return wb
 
 
-def _build_dashboard(wb, rows, period_start, period_end, script_version, demo_mode, boi_json_path):
-    ws = wb.create_sheet("Dashboard")
-    ws.sheet_view.showGridLines = False
+# ---------------------------------------------------------------------------
+# NS-ER sheet — exact original layout
+# ---------------------------------------------------------------------------
 
-    total = sum(1 for r in rows if r["result"] in (RESULT_OK, RESULT_EXCEPTION, RESULT_NS_CARRY_FWD, RESULT_NS_MISSING))
-    ok = sum(1 for r in rows if r["result"] == RESULT_OK)
-    exceptions = sum(1 for r in rows if r["result"] == RESULT_EXCEPTION)
-    carry = sum(1 for r in rows if r["result"] == RESULT_NS_CARRY_FWD)
-    missing = sum(1 for r in rows if r["result"] == RESULT_NS_MISSING)
-    no_pub = sum(1 for r in rows if r["result"] == RESULT_BOI_NO_PUBLISH)
+def _build_ns_er(wb, rows: list[Row], period_start: date, period_end: date, demo_mode: bool):
+    ws = wb.create_sheet("NS - ER")
+    ws.sheet_view.showGridLines = True
 
-    pub_days_set = {r["date"] for r in rows if r["result"] != RESULT_BOI_NO_PUBLISH}
-    cal_days = (period_end - period_start).days + 1
-
-    source_mode = "DEMO" if demo_mode else (_get_boi_source_mode(boi_json_path) if boi_json_path else "unknown")
     period_str = f"{period_start.strftime('%B %Y')}"
-    run_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-    # Title
-    ws.merge_cells("B2:H2")
-    title = ws["B2"]
-    title.value = f"FR-8 Exchange Rate Reconciliation — {period_str}"
-    title.font = Font(bold=True, size=14, color=C_WHITE)
-    title.fill = _hfill(C_HEADER_DARK)
-    title.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[2].height = 30
+    # ── Rows 1–2: sign-off block ─────────────────────────────────────────────
+    ws["C1"] = BOI_URL
+    ws["G1"] = "Performed by:"
+    ws["G1"].font = _font(bold=True)
+    ws["H1"] = ""          # name — reviewer fills in
+    ws["I1"] = None        # date — reviewer fills in
 
-    ws.merge_cells("B3:H3")
-    sub = ws["B3"]
-    sub.value = "Perion Network Ltd. | SOX Control FR-8 | Detective / Manual / Monthly / Key"
-    sub.font = Font(size=10, color="444444")
-    sub.alignment = Alignment(horizontal="center")
+    ws["G2"] = "Reviewed by:"
+    ws["G2"].font = _font(bold=True)
+    ws["H2"] = ""
+    ws["I2"] = None
 
-    # Summary metrics
-    _dash_row(ws, 5, "Period", period_str)
-    _dash_row(ws, 6, "Calendar days", cal_days)
-    _dash_row(ws, 7, "BOI publishing days", len(pub_days_set))
-    _dash_row(ws, 8, "Total comparisons performed", total)
-    _dash_row(ws, 9, "OK", ok, C_OK)
-    _dash_row(ws, 10, "Carry-forward flagged (review)", carry, C_CARRY)
-    _dash_row(ws, 11, "Completeness gaps (NS missing)", missing, C_MISSING if missing else C_OK)
-    _dash_row(ws, 12, "EXCEPTIONS (> tolerance)", exceptions, C_EXCEPTION if exceptions else C_OK)
-    _dash_row(ws, 13, "Non-publish days (holidays/Sat)", no_pub)
-    _dash_row(ws, 14, "Data source (BOI)", source_mode)
-    _dash_row(ws, 15, "Script version", script_version)
-    _dash_row(ws, 16, "Run timestamp", run_ts)
+    # ── Row 3: section headers (cross-rate blocks only) ──────────────────────
+    _section_header(ws, 3, "O", "Check for ILS/USD")
+    _section_header(ws, 3, "S", "Check for ILS/EUR")
+    _section_header(ws, 3, "W", "Check for USD/EUR")
+    _section_header(ws, 3, "AA", "Check for EUR/USD")
+    _section_header(ws, 3, "AE", "Check for USD/GBP")
+    _section_header(ws, 3, "AI", "Check for GBP/USD")
 
-    # Overall result
-    ws.merge_cells("B18:C18")
-    ws["B18"].value = "Overall Result"
-    ws["B18"].font = Font(bold=True, size=11)
+    # ── Row 4: column headers ────────────────────────────────────────────────
+    ws["A4"] = "Date"
+    # Direct blocks
+    for col, label in [
+        ("C", "Exchange Rate Netsuite"), ("D", "Exchange Rate BOI"), ("E", "GAP"),
+        ("G", "Exchange Rate Netsuite"), ("H", "Exchange Rate BOI"), ("I", "GAP"),
+        ("K", "Exchange Rate Netsuite"), ("L", "Exchange Rate BOI"), ("M", "GAP"),
+    ]:
+        ws[f"{col}4"] = label
+        ws[f"{col}4"].font = _font(bold=True)
+        ws[f"{col}4"].fill = _fill(C_LBLUE)
 
-    ws.merge_cells("D18:H18")
-    if exceptions > 0 or missing > 0:
-        result_text = "REVIEW REQUIRED — see Exceptions tab"
-        result_fill = _hfill(C_EXCEPTION)
-    else:
-        result_text = "PASS — No exceptions identified"
-        result_fill = _hfill(C_OK)
-    ws["D18"].value = result_text
-    ws["D18"].font = Font(bold=True, size=11)
-    ws["D18"].fill = result_fill
-    ws["D18"].alignment = Alignment(horizontal="center", vertical="center")
+    # Cross-rate blocks (header matches original incl. typo)
+    for col, label in [
+        ("O", "Exchange Rate Netsuite"), ("P", "Exchange Rate Claculated"), ("Q", "GAP"),
+        ("S", "Exchange Rate Netsuite"), ("T", "Exchange Rate Claculated"), ("U", "GAP"),
+        ("W", "Exchange Rate Netsuite"), ("X", "Exchange Rate Claculated"), ("Y", "GAP"),
+        ("AA", "Exchange Rate Netsuite"), ("AB", "Exchange Rate Claculated"), ("AC", "GAP"),
+        ("AE", "Exchange Rate Netsuite"), ("AF", "Exchange Rate Claculated"), ("AG", "GAP"),
+        ("AI", "Exchange Rate Netsuite"), ("AJ", "Exchange Rate Claculated"), ("AK", "GAP"),
+    ]:
+        ws[f"{col}4"] = label
+        ws[f"{col}4"].font = _font(bold=True)
+        ws[f"{col}4"].fill = _fill(C_LBLUE)
 
-    # Sign-off block
-    _section_header(ws, 20, "Sign-Off")
-    _signoff_row(ws, 21, "Prepared by (Bookkeeper)", "Kati", "", "")
-    _signoff_row(ws, 22, "Reviewed by (Bookkeeping Manager)", "", "", "")
-    _signoff_row(ws, 23, "Review date", "", "", "")
+    ws["A4"].font = _font(bold=True)
+    ws["A4"].fill = _fill(C_LBLUE)
 
-    # Reviewer notes
-    _section_header(ws, 25, "Reviewer Notes (document what was reviewed)")
-    ws.merge_cells("B26:H29")
-    notes_cell = ws["B26"]
-    notes_cell.value = ""
-    notes_cell.alignment = Alignment(wrap_text=True, vertical="top")
-    notes_cell.border = _thin_border()
+    # ── Row 5: currency labels + GAP totals ──────────────────────────────────
+    ws["C5"] = "Curr: USD, Currency Name: US Dollars"
+    ws["G5"] = "Curr: EUR, Currency Name: Euro"
+    ws["K5"] = "Curr: GBP, Currency Name: British Pound"
+    for lbl_col in ("C5", "G5", "K5"):
+        ws[lbl_col].font = _font(italic=True, size=9)
 
-    ws.row_dimensions[26].height = 60
+    # Compute and write GAP sums
+    gap_cols = ["E", "I", "M", "Q", "U", "Y", "AC", "AG", "AK"]
+    for col in gap_cols:
+        total = sum(
+            getattr(r, col) for r in rows
+            if getattr(r, col) is not None
+        )
+        ws[f"{col}5"] = round(total, 6)
+        ws[f"{col}5"].font = _font(bold=True)
+        ws[f"{col}5"].fill = _fill(C_OK if round(total, 6) == 0 else C_FAIL)
+        ws[f"{col}5"].number_format = "0.000000"
 
-    ws.column_dimensions["A"].width = 3
-    ws.column_dimensions["B"].width = 35
-    ws.column_dimensions["C"].width = 20
-    ws.column_dimensions["D"].width = 20
-    ws.column_dimensions["E"].width = 15
-    ws.column_dimensions["F"].width = 15
-    ws.column_dimensions["G"].width = 15
-    ws.column_dimensions["H"].width = 15
+    # ── Rows 6+: data rows ───────────────────────────────────────────────────
+    for r_idx, r in enumerate(rows, 6):
+        ws.cell(r_idx, 1, r.d).number_format = "DD/MM/YYYY"
 
+        _write_rate(ws, r_idx, "C", r.C)
+        _write_rate(ws, r_idx, "D", r.D)
+        _write_gap(ws,  r_idx, "E", r.E)
 
-def _dash_row(ws, row, label, value, fill_colour=None):
-    lbl = ws.cell(row=row, column=2, value=label)
-    lbl.font = Font(bold=True, size=10)
-    lbl.border = _thin_border()
+        _write_rate(ws, r_idx, "G", r.G)
+        _write_rate(ws, r_idx, "H", r.H)
+        _write_gap(ws,  r_idx, "I", r.I)
 
-    val = ws.cell(row=row, column=3, value=value)
-    val.font = Font(size=10)
-    val.border = _thin_border()
-    if fill_colour:
-        val.fill = _hfill(fill_colour)
-    ws.row_dimensions[row].height = 16
+        _write_rate(ws, r_idx, "K", r.K)
+        _write_rate(ws, r_idx, "L", r.L)
+        _write_gap(ws,  r_idx, "M", r.M)
 
+        _write_rate(ws, r_idx, "O", r.O)
+        _write_rate(ws, r_idx, "P", r.P)
+        _write_gap(ws,  r_idx, "Q", r.Q, decimals=6)
 
-def _section_header(ws, row, text):
-    ws.merge_cells(f"B{row}:H{row}")
-    cell = ws[f"B{row}"]
-    cell.value = text
-    cell.font = Font(bold=True, size=10, color=C_WHITE)
-    cell.fill = _hfill(C_HEADER_MID)
-    cell.alignment = Alignment(horizontal="left")
-    ws.row_dimensions[row].height = 18
+        _write_rate(ws, r_idx, "S", r.S)
+        _write_rate(ws, r_idx, "T", r.T)
+        _write_gap(ws,  r_idx, "U", r.U, decimals=6)
 
+        _write_rate(ws, r_idx, "W", r.W)
+        _write_rate(ws, r_idx, "X", r.X)
+        _write_gap(ws,  r_idx, "Y", r.Y, decimals=6)
 
-def _signoff_row(ws, row, label, default_name, default_date, default_sig):
-    ws.cell(row=row, column=2, value=label).font = Font(bold=True, size=10)
-    ws.cell(row=row, column=3, value=default_name).border = _thin_border()
-    ws.cell(row=row, column=4, value="Date:").font = Font(size=10)
-    ws.cell(row=row, column=5, value=default_date).border = _thin_border()
+        _write_rate(ws, r_idx, "AA", r.AA)
+        _write_rate(ws, r_idx, "AB", r.AB)
+        _write_gap(ws,  r_idx, "AC", r.AC, decimals=6)
 
+        _write_rate(ws, r_idx, "AE", r.AE)
+        _write_rate(ws, r_idx, "AF", r.AF)
+        _write_gap(ws,  r_idx, "AG", r.AG, decimals=6)
 
-def _build_reconciliation(wb, rows, period_start, period_end):
-    ws = wb.create_sheet("Reconciliation")
+        _write_rate(ws, r_idx, "AI", r.AI)
+        _write_rate(ws, r_idx, "AJ", r.AJ)
+        # AK = AI - AJ, not abs (per original formula =AI-AJ)
+        _write_gap(ws,  r_idx, "AK", r.AK, decimals=6, allow_negative=True)
 
-    headers = ["Date", "Day", "Base", "Quote", "Pair", "NS Rate", "BOI Rate", "Gap", "Tolerance", "Result"]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = _header_font()
-        cell.fill = _hfill(C_HEADER_DARK)
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = _thin_border()
+        # Shade non-publish days lightly
+        if not r.boi_published:
+            for col_letter in ("D", "H", "L"):
+                ws[f"{col_letter}{r_idx}"].fill = _fill(C_GREY)
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+    # ── Column widths ────────────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 12
+    for col in ("B", "F", "J", "N", "R", "V", "Z", "AD", "AH"):
+        ws.column_dimensions[col].width = 2
+    for col in ("C","D","E","G","H","I","K","L","M",
+                "O","P","Q","S","T","U","W","X","Y",
+                "AA","AB","AC","AE","AF","AG","AI","AJ","AK"):
+        ws.column_dimensions[col].width = 16
 
-    for r_idx, row in enumerate(rows, 2):
-        d = row["date"]
-        pair_str = f"{row['base']}/{row['quote']}"
-        fill = _result_fill(row["result"])
-
-        values = [
-            d,
-            d.strftime("%A"),
-            row["base"],
-            row["quote"],
-            pair_str,
-            row["ns_rate"],
-            row["boi_rate"],
-            row["gap"],
-            row["tolerance"],
-            row["result"],
-        ]
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=r_idx, column=col, value=val)
-            cell.border = _thin_border()
-            if fill:
-                cell.fill = fill
-            if col in (6, 7, 8, 9):
-                cell.number_format = "0.000000"
-            if col == 1:
-                cell.number_format = "YYYY-MM-DD"
-
-    _auto_width(ws)
+    ws.freeze_panes = "B6"
 
 
-def _build_ns_tab(wb, rows):
-    ws = wb.create_sheet("NS-ER")
-    headers = ["Date", "Base Currency", "Quote Currency", "Pair", "NS Exchange Rate"]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = _header_font()
-        cell.fill = _hfill(C_HEADER_MID)
-        cell.border = _thin_border()
+def _section_header(ws, row: int, col: str, text: str):
+    c = ws[f"{col}{row}"]
+    c.value = text
+    c.font = _font(bold=True, color=C_WHITE)
+    c.fill = _fill(C_BLUE)
+    c.alignment = Alignment(horizontal="center")
 
-    ws.freeze_panes = "A2"
 
-    written = set()
-    r_idx = 2
-    for row in rows:
-        key = (row["date"], row["base"], row["quote"])
-        if key in written or row["ns_rate"] is None:
+def _write_rate(ws, row: int, col: str, value):
+    if value is None:
+        return
+    c = ws[f"{col}{row}"]
+    c.value = value
+    c.number_format = "0.0000"
+
+
+def _write_gap(ws, row: int, col: str, value, decimals: int = 4, allow_negative: bool = False):
+    if value is None:
+        return
+    c = ws[f"{col}{row}"]
+    c.value = value
+    fmt = f"0.{'0' * decimals}"
+    c.number_format = fmt
+    # Highlight any non-zero gap
+    threshold = 0.0001 if decimals <= 4 else 0.000001
+    is_exception = abs(value) > threshold if allow_negative else (value is not None and value > threshold)
+    if is_exception:
+        c.fill = _fill(C_FAIL)
+        c.font = _font(bold=True)
+
+
+# ---------------------------------------------------------------------------
+# BOI Rates sheet — matches ExchangeRates BOI format in original
+# ---------------------------------------------------------------------------
+
+def _build_boi_rates(wb, boi_raw: dict, period_start: date, period_end: date):
+    ws = wb.create_sheet("ExchangeRates BOI")
+
+    ws["A1"] = BOI_HEBREW_HEADER
+    ws["A1"].font = _font(bold=True)
+    ws["H1"] = BOI_URL
+
+    period_label = (
+        f"טווח תאריכים : "
+        f"{period_start.strftime('%d/%m/%Y')}-{period_end.strftime('%d/%m/%Y')}"
+    )
+    ws["A2"] = period_label
+
+    ws["A3"] = (
+        "אם לא פורסם שער יציג ליום המבוקש, מוצג השער האחרון שפורסם לפניו"
+    )
+    ws["A3"].font = _font(italic=True, size=9)
+
+    # Headers row 5 (matches original)
+    for col, lbl in [("A","תאריך"), ("B","דולר ארצות הברית"),
+                     ("C","ליש\"ט בריטניה"), ("D","אירו האיחוד המוניטרי האירופי")]:
+        c = ws[f"{col}5"]
+        c.value = lbl
+        c.font = _font(bold=True)
+        c.fill = _fill(C_LBLUE)
+
+    # Data: only BOI-published dates (no carry-forward in this sheet)
+    r_idx = 6
+    for d in _date_range(period_start, period_end):
+        usd = boi_raw.get((d, "ILS", "USD"))
+        eur = boi_raw.get((d, "ILS", "EUR"))
+        gbp = boi_raw.get((d, "ILS", "GBP"))
+        if usd is None and eur is None and gbp is None:
             continue
-        written.add(key)
-        values = [row["date"], row["base"], row["quote"], f"{row['base']}/{row['quote']}", row["ns_rate"]]
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=r_idx, column=col, value=val)
-            cell.border = _thin_border()
-            if col == 5:
-                cell.number_format = "0.000000"
-            if col == 1:
-                cell.number_format = "YYYY-MM-DD"
+        ws.cell(r_idx, 1, d).number_format = "DD/MM/YYYY"
+        ws.cell(r_idx, 2, usd).number_format = "0.0000" if usd else ""
+        ws.cell(r_idx, 3, gbp).number_format = "0.0000" if gbp else ""  # col C = GBP (original order)
+        ws.cell(r_idx, 4, eur).number_format = "0.0000" if eur else ""  # col D = EUR
         r_idx += 1
 
     _auto_width(ws)
 
 
-def _build_boi_tab(wb, rows):
-    ws = wb.create_sheet("BOI-ER")
-    headers = ["Date", "Base Currency", "Quote Currency", "Pair", "BOI Exchange Rate", "Source"]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = _header_font()
-        cell.fill = _hfill(C_HEADER_MID)
-        cell.border = _thin_border()
+# ---------------------------------------------------------------------------
+# NS source sheets — one per pair direction
+# ---------------------------------------------------------------------------
 
-    ws.freeze_panes = "A2"
-
-    written = set()
-    r_idx = 2
-    for row in rows:
-        key = (row["date"], row["base"], row["quote"])
-        if key in written or row["boi_rate"] is None:
-            continue
-        if row["result"] == RESULT_BOI_NO_PUBLISH:
-            continue
-        written.add(key)
-        is_direct = (row["base"], row["quote"]) in DIRECT_PAIRS
-        source = "BOI SDMX direct" if is_direct else "Derived (cross-rate)"
-        values = [row["date"], row["base"], row["quote"], f"{row['base']}/{row['quote']}", row["boi_rate"], source]
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=r_idx, column=col, value=val)
-            cell.border = _thin_border()
-            if col == 5:
-                cell.number_format = "0.000000"
-            if col == 1:
-                cell.number_format = "YYYY-MM-DD"
-        r_idx += 1
-
-    _auto_width(ws)
+_NS_PAIRS = [
+    ("ILS-USD",   "ILS", "USD"),
+    ("ILS-EURO",  "ILS", "EUR"),
+    ("ILS-GBP",   "ILS", "GBP"),
+    ("USD to ILS","USD", "ILS"),
+    ("EUR to ILS","EUR", "ILS"),
+    ("USD to EUR","USD", "EUR"),
+    ("EUR to USD","EUR", "USD"),
+    ("USD to GBP","USD", "GBP"),
+    ("GBP to USD","GBP", "USD"),
+]
 
 
-def _build_exceptions_tab(wb, rows):
-    ws = wb.create_sheet("Exceptions")
+def _build_ns_source_sheets(wb, ns: dict, period_start: date, period_end: date):
+    for sheet_name, base, quote in _NS_PAIRS:
+        ws = wb.create_sheet(sheet_name)
 
-    exc_rows = [r for r in rows if r["result"] in (RESULT_EXCEPTION, RESULT_NS_MISSING)]
+        ws["A1"] = "Currency Exchange Rates"
+        ws["A1"].font = _font(bold=True)
+        ws["K1"] = "IL Exchange Rates Form (SS)"
 
-    ws.merge_cells("A1:J1")
-    header_cell = ws["A1"]
-    if exc_rows:
-        header_cell.value = f"EXCEPTIONS — {len(exc_rows)} item(s) require investigation"
-        header_cell.fill = _hfill(C_EXCEPTION)
-    else:
-        header_cell.value = "No exceptions — All comparisons passed"
-        header_cell.fill = _hfill(C_OK)
-    header_cell.font = Font(bold=True, size=11)
-    header_cell.alignment = Alignment(horizontal="center")
+        period_label = (
+            f"Start Date: {period_start.strftime('%m/%d/%Y')} - "
+            f"End Date: {period_end.strftime('%m/%d/%Y')}"
+        )
+        ws["A3"] = period_label
 
-    col_headers = ["Date", "Base", "Quote", "Pair", "NS Rate", "BOI Rate", "Gap", "Tolerance", "Result", "Investigation Notes"]
-    for col, h in enumerate(col_headers, 1):
-        cell = ws.cell(row=2, column=col, value=h)
-        cell.font = _header_font()
-        cell.fill = _hfill(C_HEADER_DARK)
-        cell.border = _thin_border()
+        for col, lbl in [("A","Base Currency"),("B","Currency"),
+                         ("C","Exchange Rate"),("D","Effective Date")]:
+            c = ws[f"{col}4"]
+            c.value = lbl
+            c.font = _font(bold=True)
+            c.fill = _fill(C_LBLUE)
 
-    for r_idx, row in enumerate(exc_rows, 3):
-        fill = _result_fill(row["result"])
-        values = [
-            row["date"], row["base"], row["quote"],
-            f"{row['base']}/{row['quote']}",
-            row["ns_rate"], row["boi_rate"], row["gap"], row["tolerance"],
-            row["result"], ""
-        ]
-        for col, val in enumerate(values, 1):
-            cell = ws.cell(row=r_idx, column=col, value=val)
-            cell.border = _thin_border()
-            if fill:
-                cell.fill = fill
-            if col in (5, 6, 7, 8):
-                cell.number_format = "0.000000"
-            if col == 1:
-                cell.number_format = "YYYY-MM-DD"
+        r_idx = 5
+        for d in _date_range(period_start, period_end):
+            rate = ns.get((d, base, quote))
+            if rate is None:
+                continue
+            ws.cell(r_idx, 1, base)
+            ws.cell(r_idx, 2, quote)
+            ws.cell(r_idx, 3, rate).number_format = "0.000000"
+            ws.cell(r_idx, 4, d).number_format = "DD/MM/YYYY"
+            r_idx += 1
 
-    _auto_width(ws)
+        _auto_width(ws, mn=10)
 
 
-def _build_ipe_evidence(wb, rows, period_start, period_end, ns_json_path, boi_json_path, script_version, demo_mode):
+# ---------------------------------------------------------------------------
+# IPE Evidence sheet
+# ---------------------------------------------------------------------------
+
+def _build_ipe_evidence(wb, rows, period_start, period_end,
+                        ns_path, boi_path, version, demo_mode):
     ws = wb.create_sheet("IPE Evidence")
     ws.sheet_view.showGridLines = False
 
     ws.merge_cells("B2:F2")
-    ws["B2"].value = "IPE Evidence — FR-8 Control Run Metadata"
-    ws["B2"].font = Font(bold=True, size=12, color=C_WHITE)
-    ws["B2"].fill = _hfill(C_HEADER_DARK)
-    ws["B2"].alignment = Alignment(horizontal="center")
+    c = ws["B2"]
+    c.value = "IPE Evidence — FR-8 Control Run Metadata"
+    c.font = _font(bold=True, size=12, color=C_WHITE)
+    c.fill = _fill(C_DARK)
+    c.alignment = Alignment(horizontal="center")
 
-    metadata = [
-        ("Control reference", "FR-8"),
-        ("Period start", period_start.isoformat()),
-        ("Period end", period_end.isoformat()),
-        ("Run timestamp (UTC)", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")),
-        ("Script version", script_version),
-        ("Data source — NS", ns_json_path or ("DEMO" if demo_mode else "Not specified")),
-        ("Data source — BOI", boi_json_path or ("DEMO" if demo_mode else "Not specified")),
-        ("BOI source mode", "DEMO" if demo_mode else (_get_boi_source_mode(boi_json_path) if boi_json_path else "N/A")),
-        ("Total rows reconciled", len(rows)),
-        ("NS-ER row count", len({(r["date"], r["base"], r["quote"]) for r in rows if r["ns_rate"] is not None})),
-        ("BOI-ER row count", len({(r["date"], r["base"], r["quote"]) for r in rows if r["boi_rate"] is not None})),
-        ("Exceptions", sum(1 for r in rows if r["result"] == RESULT_EXCEPTION)),
-        ("Completeness gaps", sum(1 for r in rows if r["result"] == RESULT_NS_MISSING)),
-        ("Tolerance — direct rates", TOLERANCE_DIRECT),
-        ("Tolerance — cross-rates", TOLERANCE_CROSS),
-        ("Holiday calendar source", "fr-8/references/israeli-holidays.json"),
-        ("Run by", "FR-8 automated skill (Claude Code)"),
+    source = "DEMO" if demo_mode else (
+        _get_boi_source_mode(boi_path) if boi_path else "N/A"
+    )
+
+    gap_cols = ["E","I","M","Q","U","Y","AC","AG","AK"]
+    nonzero = [
+        (r.d, col, getattr(r, col))
+        for r in rows for col in gap_cols
+        if getattr(r, col) is not None and abs(getattr(r, col)) > 1e-9
     ]
 
-    for r_idx, (label, value) in enumerate(metadata, 4):
-        lbl = ws.cell(row=r_idx, column=2, value=label)
-        lbl.font = Font(bold=True, size=10)
-        lbl.border = _thin_border()
-        val = ws.cell(row=r_idx, column=3, value=str(value))
-        val.font = Font(size=10)
-        val.border = _thin_border()
-        ws.row_dimensions[r_idx].height = 15
+    meta = [
+        ("Control reference", "FR-8"),
+        ("Period", f"{period_start} to {period_end}"),
+        ("Run timestamp (UTC)", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")),
+        ("Script version", version),
+        ("NS data source", ns_path or "DEMO"),
+        ("BOI data source", boi_path or "DEMO"),
+        ("BOI source mode", source),
+        ("Total calendar days", (period_end - period_start).days + 1),
+        ("BOI publishing days", sum(1 for r in rows if r.boi_published)),
+        ("Non-zero GAPs", len(nonzero)),
+        ("Overall result", "PASS" if not nonzero else f"REVIEW REQUIRED — {len(nonzero)} non-zero GAP(s)"),
+        ("Formula logic — direct", "E=ABS(C-D), I=ABS(G-H), M=ABS(K-L)"),
+        ("Formula logic — cross", "Q=ROUND(ABS(O-1/D),6), U=ROUND(ABS(S-1/G),6), "
+                                  "Y=ROUND(ABS(W-G/C),6), AC=ROUND(ABS(AA-C/G),6), "
+                                  "AG=ROUND(ABS(AE-L/D),6), AK=AI-ROUND(D/L,6)"),
+        ("BOI carry-forward applied", "Yes — non-publish days use last published rate"),
+    ]
+
+    for r_idx, (lbl, val) in enumerate(meta, 4):
+        lc = ws.cell(r_idx, 2, lbl)
+        lc.font = _font(bold=True)
+        lc.border = _border()
+        vc = ws.cell(r_idx, 3, str(val))
+        vc.border = _border()
 
     ws.column_dimensions["A"].width = 3
-    ws.column_dimensions["B"].width = 35
-    ws.column_dimensions["C"].width = 40
+    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions["C"].width = 60
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Main
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Generate FR-8 Exchange Rate WP")
-    parser.add_argument("--ns-json", help="Path to _ns_rates.json from NS MCP")
-    parser.add_argument("--boi-json", help="Path to _boi_rates.json from fetch_boi.py")
-    parser.add_argument("--period-start", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--period-end", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--output", required=True, help="Output .xlsx path")
-    parser.add_argument("--holidays-json", help="Path to custom holidays JSON")
-    parser.add_argument("--script-version", default="v1.0.0", help="Git tag or version string")
-    parser.add_argument("--demo", action="store_true", help="Generate WP with synthetic data (no live sources)")
+    parser.add_argument("--ns-json",        help="Path to _ns_rates.json from NS MCP")
+    parser.add_argument("--boi-json",       help="Path to _boi_rates.json from fetch_boi.py")
+    parser.add_argument("--period-start",   required=True, help="YYYY-MM-DD")
+    parser.add_argument("--period-end",     required=True, help="YYYY-MM-DD")
+    parser.add_argument("--output",         required=True, help="Output .xlsx path")
+    parser.add_argument("--holidays-json",  help="Custom Israeli holidays JSON")
+    parser.add_argument("--script-version", default="v1.0.0")
+    parser.add_argument("--demo",           action="store_true",
+                        help="Generate with synthetic zero-gap data")
     args = parser.parse_args()
 
     period_start = date.fromisoformat(args.period_start)
-    period_end = date.fromisoformat(args.period_end)
-    holidays_path = Path(args.holidays_json) if args.holidays_json else None
-    holidays = _load_holidays(holidays_path)
+    period_end   = date.fromisoformat(args.period_end)
+    holidays     = _load_holidays(Path(args.holidays_json) if args.holidays_json else None)
 
     if args.demo:
         print("Running in DEMO mode — synthetic data, zero-gap scenario")
-        ns_data = _generate_demo_ns(period_start, period_end, holidays)
-        boi_data = _generate_demo_boi(period_start, period_end, holidays)
-        ns_json_path = None
-        boi_json_path = None
+        ns, boi_raw = _generate_demo(period_start, period_end, holidays)
+        ns_path = boi_path = None
     else:
         if not args.ns_json or not args.boi_json:
-            print("ERROR: --ns-json and --boi-json are required unless --demo is used.", file=sys.stderr)
+            print("ERROR: --ns-json and --boi-json required unless --demo", file=sys.stderr)
             sys.exit(1)
         print(f"Loading NS data from {args.ns_json}...")
-        ns_data = load_ns_json(args.ns_json)
-        print(f"  Loaded {len(ns_data)} NS rate records")
-
+        ns = load_ns_json(args.ns_json)
+        print(f"  {len(ns)} NS rate records loaded")
         print(f"Loading BOI data from {args.boi_json}...")
-        boi_data = load_boi_json(args.boi_json)
-        print(f"  Loaded {len(boi_data)} BOI rate records")
-        ns_json_path = args.ns_json
-        boi_json_path = args.boi_json
+        boi_raw = load_boi_json(args.boi_json)
+        print(f"  {len(boi_raw)} BOI observations loaded")
+        ns_path  = args.ns_json
+        boi_path = args.boi_json
 
-    print("Running reconciliation...")
-    rows = reconcile(ns_data, boi_data, period_start, period_end, holidays)
+    print("Applying BOI carry-forward for non-publish days...")
+    boi_cf = apply_boi_carryforward(boi_raw, period_start, period_end)
 
-    ok = sum(1 for r in rows if r["result"] == RESULT_OK)
-    exc = sum(1 for r in rows if r["result"] == RESULT_EXCEPTION)
-    miss = sum(1 for r in rows if r["result"] == RESULT_NS_MISSING)
-    carry = sum(1 for r in rows if r["result"] == RESULT_NS_CARRY_FWD)
-    total = ok + exc + miss + carry
-    print(f"  {total} comparisons: {ok} OK, {exc} exceptions, {miss} missing, {carry} carry-fwd")
+    print("Building comparison rows...")
+    rows = build_rows(ns, boi_cf, boi_raw, period_start, period_end)
+
+    # Summary
+    gap_cols = ["E","I","M","Q","U","Y","AC","AG","AK"]
+    nonzero = [
+        (r.d, col, getattr(r, col))
+        for r in rows for col in gap_cols
+        if getattr(r, col) is not None and abs(getattr(r, col)) > 1e-9
+    ]
+    boi_days = sum(1 for r in rows if r.boi_published)
+    print(f"  {len(rows)} calendar days, {boi_days} BOI publish days")
+    print(f"  Non-zero GAPs: {len(nonzero)}")
 
     print("Building workbook...")
     wb = build_workbook(
-        rows, period_start, period_end,
-        ns_json_path if not args.demo else None,
-        boi_json_path if not args.demo else None,
+        rows, ns, boi_raw, period_start, period_end,
+        ns_path if not args.demo else None,
+        boi_path if not args.demo else None,
         args.script_version,
         args.demo,
     )
 
-    out_path = args.output
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    wb.save(out_path)
-    print(f"\nOK: Workbook saved → {out_path}")
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    wb.save(args.output)
+    print(f"\nOK: {args.output}")
 
-    if exc > 0 or miss > 0:
-        print(f"\nWARNING: {exc} rate exception(s), {miss} completeness gap(s) — review Exceptions tab")
+    if nonzero:
+        print(f"\nWARNING: {len(nonzero)} non-zero GAP(s) — review NS-ER sheet")
+        for d, col, val in nonzero[:10]:
+            print(f"  {d} col {col}: {val}")
         sys.exit(2)
 
 
