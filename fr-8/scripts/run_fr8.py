@@ -245,20 +245,36 @@ def _generate_demo_boi(period_start: date, period_end: date, holidays: set[date]
 # Data loaders
 # ---------------------------------------------------------------------------
 
+def _parse_ns_date(raw: str) -> date:
+    """NS SuiteQL returns dates as DD/MM/YYYY; also accept YYYY-MM-DD for tests."""
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw.strip(), fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse NS date: {raw!r}")
+
+
 def load_ns_json(path: str) -> dict:
-    """Load NS JSON into {(date, base, quote): rate}."""
+    """Load NS JSON into {(date, base, quote): rate}.
+
+    Accepts the raw SuiteQL MCP response (list or {data:[...]} wrapper)
+    produced by format_ns_output.py or written directly from the MCP result.
+    Handles DD/MM/YYYY date format returned by NetSuite SuiteQL.
+    """
     with open(path) as f:
         data = json.load(f)
 
+    records = data if isinstance(data, list) else data.get("data", data.get("records", []))
     result = {}
-    records = data if isinstance(data, list) else data.get("records", data.get("data", []))
     for rec in records:
         try:
-            d = date.fromisoformat(rec.get("effectivedate") or rec.get("date") or "")
-            base = (rec.get("basecurrency") or rec.get("base_currency") or "").upper()
-            quote = (rec.get("transactioncurrency") or rec.get("quote_currency") or rec.get("transaction_currency") or "").upper()
+            raw_date = rec.get("effectivedate") or rec.get("date") or ""
+            d = _parse_ns_date(raw_date)
+            base = (rec.get("basecurrency") or rec.get("base_currency") or "").upper().strip()
+            quote = (rec.get("transactioncurrency") or rec.get("quote_currency") or "").upper().strip()
             rate = float(rec.get("exchangerate") or rec.get("rate") or 0)
-            if d and base and quote and rate:
+            if d and base and quote and rate and base != quote:
                 result[(d, base, quote)] = rate
         except (ValueError, TypeError):
             continue
