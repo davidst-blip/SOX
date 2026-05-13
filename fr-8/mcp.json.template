@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "netsuite": {
+      "command": "npx",
+      "args": ["-y", "@netsuite-mcp/server"],
+      "env": {
+        "NS_ACCOUNT_ID":       "REPLACE_WITH_YOUR_ACCOUNT_ID",
+        "NS_CONSUMER_KEY":     "REPLACE_WITH_YOUR_CONSUMER_KEY",
+        "NS_CONSUMER_SECRET":  "REPLACE_WITH_YOUR_CONSUMER_SECRET",
+        "NS_TOKEN_ID":         "REPLACE_WITH_YOUR_TOKEN_ID",
+        "NS_TOKEN_SECRET":     "REPLACE_WITH_YOUR_TOKEN_SECRET"
+      }
+    }
+  }
+}
