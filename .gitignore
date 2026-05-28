@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets — NEVER commit real credentials
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# IDE
+.idea/
+# .vscode/ is intentionally tracked — commit settings.json for consistency
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SOX document uploads — real Perion data stays local only
+uploads/
+samples/real/
+
+# Test outputs
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & local DB
+*.log
+*.db
+*.sqlite
