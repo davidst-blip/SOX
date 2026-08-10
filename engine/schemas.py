@@ -137,7 +137,6 @@ class COSOComponent(str, Enum):
 
 class SOXBase(BaseModel):
     model_config = ConfigDict(
-        strict=True,
         extra="forbid",
         use_enum_values=True,
     )
