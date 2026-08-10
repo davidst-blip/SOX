@@ -19,10 +19,24 @@ from enum import Enum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
+
+
+class Role(str, Enum):
+    """
+    Platform roles — Perion-internal only.
+
+    ADMIN: David. Configures controls, manages users, oversees the platform.
+    CONTROL_OWNER: Performs the control, uploads the workpaper, views their own gap reports.
+    REVIEWER: Eldar or designated reviewer. Signs off on workpapers before Big 4.
+    """
+
+    ADMIN = "admin"
+    CONTROL_OWNER = "control_owner"
+    REVIEWER = "reviewer"
 
 
 class Frequency(str, Enum):
@@ -129,6 +143,33 @@ class SOXBase(BaseModel):
     )
 
 
+# ─── User ─────────────────────────────────────────────────────────────────────
+
+
+class User(SOXBase):
+    """
+    A platform user. Perion-internal only — no tenant isolation needed.
+
+    Controls are assigned an owner_id (who performs the control and uploads
+    the workpaper) and a reviewer_id (who signs off before Big 4).
+    Auth is handled by the backend; password hash is never in this schema.
+
+    Roles:
+      ADMIN         — David. Configures controls, manages users.
+      CONTROL_OWNER — Performs the control, uploads the workpaper.
+      REVIEWER      — Signs off on workpapers before the Big 4 sees them.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    email: str = Field(..., description="Perion email e.g. davidst@perion.com")
+    full_name: str
+    role: Role
+    entity: PerionEntity
+    is_active: bool = True
+    created_at: datetime
+    last_login: datetime | None = None
+
+
 # ─── Control & attributes ─────────────────────────────────────────────────────
 
 
@@ -172,6 +213,11 @@ class Control(SOXBase):
     frequency: Frequency
     risk_level: RiskLevel
 
+    # User assignments — UUIDs referencing User.id
+    owner_id: UUID | None = None      # control owner (performs + uploads)
+    reviewer_id: UUID | None = None   # reviewer (signs off before Big 4)
+
+    # Legacy string fields kept for RCM import where user accounts don't exist yet
     owner: str | None = None
     reviewer: str | None = None
 
@@ -298,7 +344,8 @@ class Workpaper(SOXBase):
     file_format: WorkpaperFormat
     file_size_bytes: int
 
-    uploaded_by: str
+    uploaded_by: str           # display name / email (always set)
+    uploaded_by_id: UUID | None = None   # User.id if uploaded through the platform
     uploaded_at: datetime
 
     content: WorkpaperContent | None = None
@@ -369,6 +416,7 @@ class GapReport(SOXBase):
     prompt_hash: str | None = None
     deterministic_check_results: dict[str, bool] = Field(default_factory=dict)
 
-    reviewed_by: str | None = None
+    reviewed_by: str | None = None           # display name
+    reviewed_by_id: UUID | None = None       # User.id (REVIEWER or ADMIN role)
     reviewed_at: datetime | None = None
     reviewer_notes: str | None = None
