@@ -98,7 +98,8 @@ def normalize_row(
         messages=[{"role": "user", "content": user_msg}],
     )
 
-    raw_json = response.content[0].text.strip()
+    block = response.content[0]
+    raw_json = (block.text if hasattr(block, "text") else "{}").strip()
     data = json.loads(raw_json)
 
     # Build attributes list
@@ -122,7 +123,7 @@ def normalize_row(
         name=data.get("name", "")[:120],
         description=data.get("description", ""),
         entity=_coerce_enum(data.get("entity", "Other"), PerionEntity, PerionEntity.OTHER),
-        control_type=_coerce_enum(data.get("control_type", "manual"), ControlType, ControlType.MANUAL),
+        control_type=_coerce_enum(data.get("control_type", "preventive"), ControlType, ControlType.PREVENTIVE),
         nature=_coerce_enum(data.get("nature", "manual"), ControlNature, ControlNature.MANUAL),
         frequency=_coerce_enum(data.get("frequency", "unknown"), Frequency, Frequency.UNKNOWN),
         risk_level=_coerce_enum(data.get("risk_level", "unknown"), RiskLevel, RiskLevel.UNKNOWN),

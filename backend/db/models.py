@@ -6,6 +6,7 @@ goes in JSON. This keeps queries fast without over-normalizing.
 """
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -44,8 +45,8 @@ class UserModel(Base):
     role: Mapped[str] = mapped_column(Enum(Role), nullable=False)
     entity: Mapped[str] = mapped_column(Enum(PerionEntity), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_login: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owned_controls: Mapped[list["ControlModel"]] = relationship(
         "ControlModel", foreign_keys="ControlModel.owner_id", back_populates="owner"
@@ -86,7 +87,7 @@ class ControlModel(Base):
     raw_rcm_row: Mapped[dict] = mapped_column(JSON, default=dict)
     review_reasons: Mapped[list] = mapped_column(JSON, default=list)
 
-    parsed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     parser_version: Mapped[str] = mapped_column(String(50), nullable=False)
     needs_human_review: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -110,12 +111,12 @@ class TestPlanModel(Base):
     steps: Mapped[list] = mapped_column(JSON, default=list)
     source_inputs: Mapped[list] = mapped_column(JSON, default=list)
 
-    generated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     generated_by: Mapped[str] = mapped_column(String(20), nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), nullable=True)
     confidence: Mapped[float] = mapped_column(nullable=True)
     approved_by: Mapped[str] = mapped_column(String(255), nullable=True)
-    approved_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     control: Mapped["ControlModel"] = relationship("ControlModel", back_populates="test_plans")
     workpapers: Mapped[list["WorkpaperModel"]] = relationship("WorkpaperModel", back_populates="test_plan")
@@ -137,7 +138,7 @@ class WorkpaperModel(Base):
 
     uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
     uploaded_by_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    uploaded_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     content: Mapped[dict] = mapped_column(JSON, nullable=True)
     parsing_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
@@ -168,14 +169,14 @@ class GapReportModel(Base):
     overall_status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
 
-    analyzed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     analyzer_version: Mapped[str] = mapped_column(String(50), nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), nullable=True)
     prompt_hash: Mapped[str] = mapped_column(String(100), nullable=True)
 
     reviewed_by: Mapped[str] = mapped_column(String(255), nullable=True)
     reviewed_by_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    reviewed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewer_notes: Mapped[str] = mapped_column(Text, nullable=True)
 
     workpaper: Mapped["WorkpaperModel"] = relationship("WorkpaperModel", back_populates="gap_reports")
