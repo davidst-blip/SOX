@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import auth, users
+from backend.routers import auth, controls, users
 
 app = FastAPI(
     title="SOX Sentinel",
@@ -18,6 +18,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(controls.router)
 
 
 @app.get("/")

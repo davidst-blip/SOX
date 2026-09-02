@@ -74,8 +74,8 @@ class ControlModel(Base):
     reviewer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     # Legacy string fields for imports before user accounts are assigned
-    owner: Mapped[str] = mapped_column(String(255), nullable=True)
-    reviewer: Mapped[str] = mapped_column(String(255), nullable=True)
+    owner_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    reviewer_name: Mapped[str] = mapped_column(String(255), nullable=True)
 
     process: Mapped[str] = mapped_column(String(255), nullable=True)
     sub_process: Mapped[str] = mapped_column(String(255), nullable=True)
