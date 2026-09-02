@@ -88,8 +88,10 @@ class ControlModel(Base):
     review_reasons: Mapped[list] = mapped_column(JSON, default=list)
 
     parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     parser_version: Mapped[str] = mapped_column(String(50), nullable=False)
     needs_human_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_file: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     owner: Mapped["UserModel"] = relationship("UserModel", foreign_keys=[owner_id], back_populates="owned_controls")
     reviewer_user: Mapped["UserModel"] = relationship("UserModel", foreign_keys=[reviewer_id], back_populates="reviewer_controls")
@@ -200,3 +202,18 @@ class KnowledgeEntryModel(Base):
 
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ingested_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+
+
+class MatrixSyncModel(Base):
+    """Tracks which matrix files have been synced and their last-known hash."""
+
+    __tablename__ = "matrix_syncs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True, index=True)
+    file_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    controls_created: Mapped[int] = mapped_column(Integer, default=0)
+    controls_updated: Mapped[int] = mapped_column(Integer, default=0)
+    controls_unchanged: Mapped[int] = mapped_column(Integer, default=0)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
