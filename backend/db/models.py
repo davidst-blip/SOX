@@ -180,3 +180,23 @@ class GapReportModel(Base):
     reviewer_notes: Mapped[str] = mapped_column(Text, nullable=True)
 
     workpaper: Mapped["WorkpaperModel"] = relationship("WorkpaperModel", back_populates="gap_reports")
+
+
+class KnowledgeEntryModel(Base):
+    __tablename__ = "knowledge_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    control_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    period: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+
+    source_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_format: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    # Parsed sections from file_parser (list of {name, text, tables})
+    raw_sections: Mapped[list] = mapped_column(JSON, default=list)
+    # Haiku-generated summary of what was tested
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingested_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
