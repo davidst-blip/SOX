@@ -10,7 +10,6 @@ PATCH /controls/{id}/assign — assign owner_id / reviewer_id
 import hashlib
 import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -24,7 +23,7 @@ from backend.db.session import get_db
 from backend.settings import get_settings
 from engine.rcm_parser.excel_parser import parse_rcm_excel
 from engine.rcm_parser.llm_normalizer import normalize_row
-from engine.schemas import PerionEntity, Role
+from engine.schemas import Role
 
 router = APIRouter(prefix="/controls", tags=["controls"])
 

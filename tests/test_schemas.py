@@ -7,7 +7,6 @@ if any model breaks here, every downstream layer is affected.
 """
 
 from datetime import datetime, timezone
-from uuid import uuid4
 
 import pytest
 
@@ -29,9 +28,7 @@ from engine.schemas import (
     TestPlan,
     TestStep,
     Workpaper,
-    WorkpaperContent,
     WorkpaperFormat,
-    WorkpaperTab,
 )
 
 NOW = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)

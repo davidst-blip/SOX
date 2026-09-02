@@ -27,7 +27,6 @@ from engine.schemas import (
     ControlNature,
     ControlType,
     Frequency,
-    GapSeverity,
     PerionEntity,
     RiskLevel,
     Role,

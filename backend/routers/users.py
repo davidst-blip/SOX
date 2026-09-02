@@ -66,7 +66,7 @@ def list_users(
     db: Session = Depends(get_db),
     _admin=Depends(require_role(Role.ADMIN)),
 ):
-    users = db.query(UserModel).filter(UserModel.is_active == True).all()
+    users = db.query(UserModel).filter(UserModel.is_active.is_(True)).all()
     return [
         UserResponse(id=str(u.id), email=u.email, full_name=u.full_name, role=u.role, entity=u.entity, is_active=u.is_active)
         for u in users

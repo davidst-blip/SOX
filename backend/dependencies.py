@@ -17,7 +17,7 @@ def get_current_user(
     email = decode_token(token)
     if not email:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    user = db.query(UserModel).filter(UserModel.email == email, UserModel.is_active == True).first()
+    user = db.query(UserModel).filter(UserModel.email == email, UserModel.is_active.is_(True)).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
