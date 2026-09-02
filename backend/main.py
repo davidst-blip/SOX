@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.routers import auth, users
+
 app = FastAPI(
     title="SOX Sentinel",
     description="Internal SOX documentation review and gap-analysis platform — Perion Network Ltd.",
@@ -13,6 +15,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth.router)
+app.include_router(users.router)
 
 
 @app.get("/")
